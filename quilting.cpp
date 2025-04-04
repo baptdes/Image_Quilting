@@ -1,7 +1,7 @@
 #include <opencv2/opencv.hpp>
 #include<iostream>
 
-int main(int argc, char *argv[])
+int main()
 {
     cv::Mat texture = imread("/home/nimdaba/Documents/N7/2A/S8/Projet_Image/Textures/128x128/Bark.0000.ppm", cv::IMREAD_COLOR);
  
