@@ -15,3 +15,8 @@ set(MY_COMPILE_OPTIONS "-Wall;-Wextra;-pedantic;-Wno-comment;-Wshadow;-Wnon-virt
 add_executable(quilting quilting.cpp)
 target_link_libraries(quilting ${OpenCV_LIBS})
 target_compile_options(quilting PRIVATE ${MY_COMPILE_OPTIONS})
+
+# Add executable
+add_executable(horizontal_quilting horizontal_quilting.cpp)
+target_link_libraries(horizontal_quilting ${OpenCV_LIBS})
+target_compile_options(horizontal_quilting PRIVATE ${MY_COMPILE_OPTIONS})

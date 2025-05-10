@@ -3,6 +3,7 @@
 #include <ctime>
 #include <vector>
 #include <cmath>
+#include <algorithm>
 
 // Get a random patch from the input texture
 cv::Rect getRandomPatch(const cv::Mat& image, int patch_size) {
@@ -32,7 +33,7 @@ cv::Rect findBestPatch(const cv::Mat& texture, const cv::Mat& output_image,
             // Check left (vertical) overlap if necessary
             if (hasLeftOverlap) {
                 cv::Mat right_overlap = texture(cv::Rect(j, i, overlap_size, actual_height));
-                cv::Mat left_overlap = output_image(cv::Rect(x_offset - overlap_size, y_offset, overlap_size, actual_height));
+                cv::Mat left_overlap = output_image(cv::Rect(x_offset, y_offset, overlap_size, actual_height));
                 cv::Mat diff;
                 cv::absdiff(right_overlap, left_overlap, diff);
                 double mse = cv::norm(diff, cv::NORM_L2);
@@ -41,7 +42,7 @@ cv::Rect findBestPatch(const cv::Mat& texture, const cv::Mat& output_image,
             
             // Check top (horizontal) overlap if necessary
             if (hasTopOverlap) {
-                cv::Mat top_overlap = output_image(cv::Rect(x_offset, y_offset - overlap_size, actual_width, overlap_size));
+                cv::Mat top_overlap = output_image(cv::Rect(x_offset, y_offset, actual_width, overlap_size));
                 cv::Mat bottom_overlap = texture(cv::Rect(j, i, actual_width, overlap_size));
                 cv::Mat diff;
                 cv::absdiff(top_overlap, bottom_overlap, diff);
@@ -76,180 +77,74 @@ cv::Rect findBestPatch(const cv::Mat& texture, const cv::Mat& output_image,
     return good_coords[random_index];
 }
 
-// Find minimum error boundary cut for vertical overlap
-void minCutVertical(const cv::Mat& patch, const cv::Mat& output_image, 
-                   int x_offset, int y_offset, int overlap_size, 
-                   int height, std::vector<int>& cut) {
+
+cv::Mat computeVerticalErrorMap(const cv::Mat& overlap1, const cv::Mat& overlap2) {
+    cv::Mat diff;
+    cv::absdiff(overlap1, overlap2, diff);
     
-    cv::Mat errors = cv::Mat(height, overlap_size, CV_32F);
-    
-    // Calculate initial error in the overlap region
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < overlap_size; x++) {
-            cv::Vec3b p1 = patch.at<cv::Vec3b>(y, x);
-            cv::Vec3b p2 = output_image.at<cv::Vec3b>(y_offset + y, x_offset - overlap_size + x);
-            float err = 0;
-            for (int c = 0; c < 3; c++) {
-                err += std::pow(float(p1[c]) - float(p2[c]), 2);
+    // Create the initial cost map
+    cv::Mat cost_map = cv::Mat(diff.rows, diff.cols, CV_64F);
+    for (int i = 0; i < diff.rows; ++i) {
+        for (int j = 0; j < diff.cols; ++j) {
+            double sum = 0;
+            for (int c = 0; c < diff.channels(); ++c) {
+                double val = diff.at<cv::Vec3b>(i, j)[c];
+                sum += val * val;
             }
-            errors.at<float>(y, x) = sqrt(err);
+            cost_map.at<double>(i, j) = sum/diff.channels();
         }
     }
     
-    // Dynamic programming to find minimal path
-    cv::Mat dp = errors.clone();
-    for (int y = 1; y < height; y++) {
-        for (int x = 0; x < overlap_size; x++) {
-            float minVal = dp.at<float>(y-1, x);
-            if (x > 0) minVal = std::min(minVal, dp.at<float>(y-1, x-1));
-            if (x < overlap_size-1) minVal = std::min(minVal, dp.at<float>(y-1, x+1));
-            dp.at<float>(y, x) += minVal;
+    for (int i = 1; i < cost_map.rows; ++i) {
+        for (int j = 0; j < cost_map.cols; ++j) {
+            double min_cost = cost_map.at<double>(i-1, j); // Top
+            
+            if (j > 0)
+                min_cost = std::min(min_cost, cost_map.at<double>(i-1, j-1)); // Top-left
+                
+            if (j < cost_map.cols - 1)
+                min_cost = std::min(min_cost, cost_map.at<double>(i-1, j+1)); // Top-right
+                
+            cost_map.at<double>(i, j) += min_cost;
         }
     }
-    
-    // Backtrack to find the path
-    cut.resize(height);
-    int minIdx = 0;
-    float minVal = dp.at<float>(height-1, 0);
-    for (int x = 1; x < overlap_size; x++) {
-        if (dp.at<float>(height-1, x) < minVal) {
-            minVal = dp.at<float>(height-1, x);
-            minIdx = x;
-        }
-    }
-    cut[height-1] = minIdx;
-    
-    for (int y = height-2; y >= 0; y--) {
-        int x = cut[y+1];
-        minIdx = x;
-        minVal = dp.at<float>(y, x);
-        
-        if (x > 0 && dp.at<float>(y, x-1) < minVal) {
-            minVal = dp.at<float>(y, x-1);
-            minIdx = x-1;
-        }
-        if (x < overlap_size-1 && dp.at<float>(y, x+1) < minVal) {
-            minVal = dp.at<float>(y, x+1);
-            minIdx = x+1;
-        }
-        cut[y] = minIdx;
-    }
+    return cost_map;
 }
 
-// Find minimum error boundary cut for horizontal overlap
-void minCutHorizontal(const cv::Mat& patch, const cv::Mat& output_image, 
-                     int x_offset, int y_offset, int overlap_size, 
-                     int width, std::vector<int>& cut) {
+cv::Mat computeHorizontalErrorMap(const cv::Mat& overlap1, const cv::Mat& overlap2) {
+    cv::Mat diff;
+    cv::absdiff(overlap1, overlap2, diff);
     
-    cv::Mat errors = cv::Mat(overlap_size, width, CV_32F);
-    
-    // Calculate initial error in the overlap region
-    for (int y = 0; y < overlap_size; y++) {
-        for (int x = 0; x < width; x++) {
-            cv::Vec3b p1 = patch.at<cv::Vec3b>(y, x);
-            cv::Vec3b p2 = output_image.at<cv::Vec3b>(y_offset - overlap_size + y, x_offset + x);
-            float err = 0;
-            for (int c = 0; c < 3; c++) {
-                err += std::pow(float(p1[c]) - float(p2[c]), 2);
+    // Create the initial cost map
+    cv::Mat cost_map = cv::Mat(diff.rows, diff.cols, CV_64F);
+    for (int i = 0; i < diff.rows; ++i) {
+        for (int j = 0; j < diff.cols; ++j) {
+            double sum = 0;
+            for (int c = 0; c < diff.channels(); ++c) {
+                double val = diff.at<cv::Vec3b>(i, j)[c];
+                sum += val * val;
             }
-            errors.at<float>(y, x) = sqrt(err);
+            // Average the squared differences between channels
+            cost_map.at<double>(i, j) = sum/diff.channels();
         }
     }
-    
-    // Dynamic programming to find minimal path
-    cv::Mat dp = errors.clone();
-    for (int x = 1; x < width; x++) {
-        for (int y = 0; y < overlap_size; y++) {
-            float minVal = dp.at<float>(y, x-1);
-            if (y > 0) minVal = std::min(minVal, dp.at<float>(y-1, x-1));
-            if (y < overlap_size-1) minVal = std::min(minVal, dp.at<float>(y+1, x-1));
-            dp.at<float>(y, x) += minVal;
+
+    for (int j = cost_map.cols - 2; j >= 0; --j) {
+        for (int i = 0; i < cost_map.rows; ++i) {
+            double min_cost = cost_map.at<double>(i, j+1); // Right
+            
+            if (i > 0)
+                min_cost = std::min(min_cost, cost_map.at<double>(i-1, j+1)); // Top-right
+                
+            if (i < cost_map.rows - 1)
+                min_cost = std::min(min_cost, cost_map.at<double>(i+1, j+1)); // Bottom-right
+                
+            cost_map.at<double>(i, j) += min_cost;
         }
     }
-    
-    // Backtrack to find the path
-    cut.resize(width);
-    int minIdx = 0;
-    float minVal = dp.at<float>(0, width-1);
-    for (int y = 1; y < overlap_size; y++) {
-        if (dp.at<float>(y, width-1) < minVal) {
-            minVal = dp.at<float>(y, width-1);
-            minIdx = y;
-        }
-    }
-    cut[width-1] = minIdx;
-    
-    for (int x = width-2; x >= 0; x--) {
-        int y = cut[x+1];
-        minIdx = y;
-        minVal = dp.at<float>(y, x);
-        
-        if (y > 0 && dp.at<float>(y-1, x) < minVal) {
-            minVal = dp.at<float>(y-1, x);
-            minIdx = y-1;
-        }
-        if (y < overlap_size-1 && dp.at<float>(y+1, x) < minVal) {
-            minVal = dp.at<float>(y+1, x);
-            minIdx = y+1;
-        }
-        cut[x] = minIdx;
-    }
+    return cost_map;
 }
 
-// Place patch with minimum error boundary cut
-void placePatchWithCut(const cv::Mat& patch, cv::Mat& output_image, 
-                      int x_offset, int y_offset, 
-                      int actual_width, int actual_height, 
-                      int overlap_size) {
-    
-    bool hasLeftOverlap = (x_offset > 0);
-    bool hasTopOverlap = (y_offset > 0);
-    
-    cv::Mat actual_patch = patch(cv::Rect(0, 0, actual_width, actual_height));
-    
-    // Create a mask where 1 means use the new patch, 0 means keep existing
-    cv::Mat mask = cv::Mat::ones(actual_height, actual_width, CV_8U);
-    
-    // Handle vertical overlap (left side)
-    if (hasLeftOverlap) {
-        std::vector<int> cut;
-        minCutVertical(patch, output_image, x_offset, y_offset, overlap_size, actual_height, cut);
-        
-        for (int y = 0; y < actual_height; y++) {
-            for (int x = 0; x < overlap_size; x++) {
-                if (x < cut[y]) {
-                    mask.at<uchar>(y, x) = 0;
-                }
-            }
-        }
-    }
-    
-    // Handle horizontal overlap (top side)
-    if (hasTopOverlap) {
-        std::vector<int> cut;
-        minCutHorizontal(patch, output_image, x_offset, y_offset, overlap_size, actual_width, cut);
-        
-        for (int x = 0; x < actual_width; x++) {
-            for (int y = 0; y < overlap_size; y++) {
-                if (y < cut[x]) {
-                    mask.at<uchar>(y, x) = 0;
-                }
-            }
-        }
-    }
-    
-    // Apply the mask to blend the patches
-    cv::Rect dest_roi(x_offset, y_offset, actual_width, actual_height);
-    cv::Mat dest = output_image(dest_roi);
-    
-    for (int y = 0; y < actual_height; y++) {
-        for (int x = 0; x < actual_width; x++) {
-            if (mask.at<uchar>(y, x) > 0) {
-                dest.at<cv::Vec3b>(y, x) = actual_patch.at<cv::Vec3b>(y, x);
-            }
-        }
-    }
-}
 
 int main()
 {
@@ -257,7 +152,7 @@ int main()
     srand(static_cast<unsigned int>(time(0)));
     
     // Load the texture image
-    cv::Mat texture = cv::imread("../Textures/128x128/Brick.0007.ppm", cv::IMREAD_COLOR);
+    cv::Mat texture = cv::imread("../Textures/128x128/Food.0006.ppm", cv::IMREAD_COLOR);
  
     if (texture.empty()) {
         std::cout << "Error: Texture not found or unable to read." << std::endl;
@@ -279,7 +174,7 @@ int main()
     double threshold = 0.1; // Threshold for similarity
 
     /* |||||||||||||||||| Texture synthesis |||||||||||||||||||*/
-    int overlap_size = static_cast<int>(block_size * overlap_ratio); // Overlap size
+    int overlap_size = static_cast<int>(static_cast<float>(block_size) * overlap_ratio); // Overlap size
 
     // Compute the number of patches
     int num_patches_width = 1 + static_cast<int>(std::ceil((output_width - block_size) * 1.0 / (block_size - overlap_size)));
@@ -307,14 +202,62 @@ int main()
                 cv::Mat patch = texture(src_roi).clone();
                 cv::Rect coord_current_patch(x_offset, y_offset, actual_width, actual_height);
                 patch(cv::Rect(0, 0, actual_width, actual_height)).copyTo(output_image(coord_current_patch));
+            } else if (x == 0) {
+                // First column, only check top overlap
+
+                // Find the best matching patch
+                src_roi = findBestPatch(texture, output_image, x_offset, y_offset, 
+                                       block_size, overlap_size, actual_width, actual_height, threshold);
+
+                // Compute the error surface
+                cv::Mat top_overlap = output_image(cv::Rect(x_offset, y_offset, actual_width, overlap_size));
+                cv::Mat bottom_overlap = texture(cv::Rect(src_roi.x, src_roi.y, actual_width, overlap_size));
+                cv::Mat error_map = computeHorizontalErrorMap(top_overlap, bottom_overlap);
+
+                // Find the minimum cost path along this surface
+                double min_cost = std::numeric_limits<double>::max();
+                // Array of minimum paths
+                std::vector<int> min_paths(error_map.cols, 0.0);
+                for (int i = 0; i < error_map.rows; ++i) {
+                    if (error_map.at<double>(i, 0) < min_cost) {
+                        min_cost = error_map.at<double>(i, 0);
+                        min_paths[i] = i;
+                    }
+                }
+                // Complete the path
+                for (int j = 1; j < error_map.cols; ++j) {
+                    int ind_ligne = min_paths[j - 1];
+                    if (ind_ligne > 0 && ind_ligne < error_map.rows - 1 && error_map.at<double>(ind_ligne - 1, j) < error_map.at<double>(ind_ligne, j) && error_map.at<double>(ind_ligne - 1, j) < error_map.at<double>(ind_ligne + 1, j)) {
+                        min_paths[j] = ind_ligne - 1;
+                    } else if (ind_ligne < error_map.rows - 1 && error_map.at<double>(ind_ligne + 1, j) < error_map.at<double>(ind_ligne, j)) {
+                        min_paths[j] = ind_ligne + 1;
+                    } else {
+                        min_paths[j] = ind_ligne;
+                    }
+                }
+
+                // Paste the patch following the path
+                cv::Mat patch = texture(src_roi).clone();
+                for (int j = 0; j < error_map.cols; ++j) {
+                    int y_coord = min_paths[j];
+                    for (int i = 0; i < y_coord; ++i) {
+                        patch.at<cv::Vec3b>(i, j) = output_image.at<cv::Vec3b>(y_offset + i, x_offset + j);
+                    }
+                    //Mettre un pixel rouge à la frontière
+                    //patch.at<cv::Vec3b>(y_coord, j) = cv::Vec3b(0, 0, 255);
+                }
+
+                cv::Rect coord_current_patch(x_offset, y_offset, actual_width, actual_height);
+                patch(cv::Rect(0, 0, actual_width, actual_height)).copyTo(output_image(coord_current_patch));
+                
             } else {
                 // Find the best matching patch
                 src_roi = findBestPatch(texture, output_image, x_offset, y_offset, 
                                        block_size, overlap_size, actual_width, actual_height, threshold);
                 cv::Mat patch = texture(src_roi).clone();
-                
-                // Place the patch with minimum error boundary cut
-                placePatchWithCut(patch, output_image, x_offset, y_offset, actual_width, actual_height, overlap_size);
+
+                cv::Rect coord_current_patch(x_offset, y_offset, actual_width, actual_height);
+                patch(cv::Rect(0, 0, actual_width, actual_height)).copyTo(output_image(coord_current_patch));
             }
         }
     }
